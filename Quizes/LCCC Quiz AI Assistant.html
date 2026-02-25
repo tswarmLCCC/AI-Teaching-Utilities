@@ -1,0 +1,841 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LCCC Quiz Studio</title>
+
+    <!-- Core Libraries -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <style>
+        body {
+            background: #f0f2f5;
+            margin: 0;
+            font-family: system-ui, -apple-system, sans-serif;
+        }
+
+        .card {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+            border: 1px solid #e5e7eb;
+        }
+
+        /* LCCC Brand Colors */
+        .bg-lccc-blue {
+            background-color: #003366;
+        }
+
+        .text-lccc-blue {
+            color: #003366;
+        }
+
+        .border-lccc-blue {
+            border-color: #003366;
+        }
+
+        .hover-bg-lccc-blue:hover {
+            background-color: #002244;
+        }
+
+        .text-lccc-gold {
+            color: #FFCC00;
+        }
+
+        .bg-lccc-gold {
+            background-color: #FFCC00;
+        }
+
+        .border-lccc-gold {
+            border-color: #FFCC00;
+        }
+
+        /* Animations */
+        @keyframes spin {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+
+        .loader {
+            border: 3px solid rgba(255, 255, 255, 0.3);
+            border-top: 3px solid white;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            animation: spin 1s linear infinite;
+            display: inline-block;
+        }
+
+        @keyframes pulse-ring {
+            0% {
+                transform: scale(0.8);
+                opacity: 0.5;
+            }
+
+            100% {
+                transform: scale(1.3);
+                opacity: 0;
+            }
+        }
+
+        .recording-ring {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            border-radius: 50%;
+            background-color: #ef4444;
+            animation: pulse-ring 1.5s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;
+            z-index: 0;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(5px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .animate-fade-in {
+            animation: fadeIn 0.3s ease-out forwards;
+        }
+
+        /* Modal Backdrop */
+        .modal-backdrop {
+            background-color: rgba(0, 0, 0, 0.5);
+            backdrop-filter: blur(2px);
+        }
+
+        /* Form Controls */
+        input:focus,
+        textarea:focus,
+        select:focus {
+            outline: 2px solid #FFCC00;
+            border-color: transparent;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // --- CONSTANTS & CONFIGURATION ---
+        const DEFAULT_OLLAMA_URL = "http://localhost:11434";
+        const DEFAULT_MODEL = "hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:UD-Q4_K_XL";
+        // const DEFAULT_MODEL = "qwen2.5-coder:latest";
+        const DEFAULT_GEMINI_MODEL = "gemini-2.0-flash-exp";
+        const DEFAULT_OPENAI_URL = "https://api.openai.com/v1/chat/completions";
+        const DEFAULT_OPENAI_MODEL = "gpt-4o-mini";
+
+        const SYSTEM_PROMPT = `You are a quiz generation system. Your ONLY job is to output valid JSON - nothing else.
+
+CRITICAL RULES:
+1. OUTPUT ONLY JSON - No explanations, no markdown, no conversational text
+2. Start your response with { and end with }
+3. Do not wrap JSON in markdown code blocks
+4. ROOT STRUCTURE: {"title": "string", "questions": [...]}
+5. ESCAPE ALL SPECIAL CHARACTERS: Ensure all strings use standard JSON escaping.
+6. NO INTERNAL QUOTES: Avoid using double quotes inside "prompt" or "text" strings (e.g., use 'W' instead of "W"). This prevents parsing errors.
+
+⚠️ CRITICAL: NEVER include answer choices in the "prompt" field!
+The "prompt" field should ONLY contain the question itself.
+Answer choices go in the separate "answers" array.
+
+QUESTION SCHEMAS:
+
+Multiple Choice / True-False:
+{
+  "type": "multiple_choice_question" | "true_false_question",
+  "title": "Question 1",
+  "points": 1,
+  "prompt": "The actual question text ONLY - no answers here!",
+  "answers": [
+    {"text": "Answer option", "isCorrect": true},
+    {"text": "Another option", "isCorrect": false}
+  ],
+  "correctAnswer": "True" (for true/false only)
+}
+
+Short Answer:
+{
+  "type": "short_answer_question",
+  "title": "Question 2",
+  "points": 1,
+  "prompt": "What is the capital of France?",
+  "correctText": "Paris"  // ⚠️ REQUIRED for short answer!
+}
+
+TYPES:
+- multiple_choice_question: Multiple options, one correct
+- true_false_question: True or False
+- short_answer_question: Text input - MUST include "correctText" field with expected answer
+
+RULES:
+- For multiple choice: exactly ONE answer must have "isCorrect": true
+- For true/false: set "correctAnswer" to "True" or "False"
+- For short answer: ALWAYS include "correctText" with the expected answer
+- NEVER put "A)", "B)", "C)" or answer text in the prompt field
+
+❌ WRONG - DO NOT DO THIS:
+{
+  "prompt": "What is photosynthesis? A) Process to make food B) Cell division C) Respiration"
+}
+
+✅ CORRECT - DO THIS:
+{
+  "prompt": "What is photosynthesis?",
+  "answers": [
+    {"text": "Process plants use to make food", "isCorrect": true},
+    {"text": "Process of cell division", "isCorrect": false},
+    {"text": "Process of respiration", "isCorrect": false}
+  ]
+}
+
+EXAMPLE OUTPUT:
+{
+  "title": "Biology Quiz",
+  "questions": [
+    {
+      "type": "multiple_choice_question",
+      "title": "Question 1",
+      "points": 1,
+      "prompt": "What is photosynthesis?",
+      "answers": [
+        {"text": "Process plants use to make food", "isCorrect": true},
+        {"text": "Process of cell division", "isCorrect": false},
+        {"text": "Process of respiration", "isCorrect": false}
+      ]
+    },
+    {
+      "type": "short_answer_question",
+      "title": "Question 2",
+      "points": 1,
+      "prompt": "What organelle is responsible for photosynthesis?",
+      "correctText": "chloroplast"
+    }
+  ]
+}`;
+
+        // --- ICONS WRAPPER ---
+        const Icon = ({ name, size = 16, className }) => {
+            const ref = useRef(null);
+            useEffect(() => {
+                if (!ref.current || !window.lucide) return;
+                ref.current.innerHTML = '';
+                const el = document.createElement('i');
+                el.setAttribute('data-lucide', name);
+                if (className) el.className = className;
+                el.style.width = `${size}px`;
+                el.style.height = `${size}px`;
+                ref.current.appendChild(el);
+                window.lucide.createIcons({ root: ref.current });
+            }, [name, size, className]);
+            return <span ref={ref} style={{ display: 'inline-flex', verticalAlign: 'middle' }}></span>;
+        };
+
+        // --- HELPER FUNCTIONS ---
+        const escapeXML = (str) => String(str || '').replace(/[<>&'"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' }[c]));
+        const genId = (prefix = 'id') => `${prefix}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+        // Smart Mapping for AI variations
+        const sanitizeQuestions = (questions) => {
+            if (!Array.isArray(questions)) return [];
+            return questions.map((q, idx) => {
+                const rawAnswers = Array.isArray(q.answers) ? q.answers :
+                    (Array.isArray(q.options) ? q.options :
+                        (Array.isArray(q.choices) ? q.choices : []));
+
+                let base = {
+                    type: q.type || 'multiple_choice_question',
+                    title: q.title || `Question ${idx + 1}`,
+                    points: parseInt(q.points) || 1,
+                    prompt: q.prompt || q.question || q.text || q.content || "",
+                    answers: rawAnswers.map(a => {
+                        const text = a.text || a.answer || a.option || a.content || String(a);
+                        const isCorrect = !!(a.isCorrect === true || a.correct === true || a.valid === true);
+                        return { text, isCorrect };
+                    }),
+                    correctAnswer: q.correctAnswer || q.answer || 'True',
+                    correctText: q.correctText || q.answer || q.correctAnswer || '',
+                    correctNumber: parseFloat(q.correctNumber) || 0,
+                    tolerance: parseFloat(q.tolerance) || 0
+                };
+
+                // SMART SWAP: If title looks like a question but prompt is empty/generic, swap them
+                const titleLooksLikeQuestion = base.title && (
+                    base.title.includes('?') ||
+                    base.title.length > 30 ||
+                    base.title.toLowerCase().startsWith('what') ||
+                    base.title.toLowerCase().startsWith('how') ||
+                    base.title.toLowerCase().startsWith('when') ||
+                    base.title.toLowerCase().startsWith('where') ||
+                    base.title.toLowerCase().startsWith('why') ||
+                    base.title.toLowerCase().startsWith('who')
+                );
+
+                const promptIsMissing = !base.prompt || base.prompt === "" || base.prompt === "Question content is missing";
+
+                if (titleLooksLikeQuestion && promptIsMissing) {
+                    // Swap: title becomes prompt, generate new title
+                    base.prompt = base.title;
+                    base.title = `Question ${idx + 1}`;
+                }
+
+                // Fallback if prompt is still empty
+                if (!base.prompt || base.prompt === "") {
+                    base.prompt = "Question content is missing. Check AI response.";
+                }
+
+                if (base.type === 'multiple_choice_question' || base.type === 'multiple_answers_question') {
+                    if (base.answers.length === 0) {
+                        base.answers = [
+                            { text: "Option A (AI did not provide options)", isCorrect: true },
+                            { text: "Option B", isCorrect: false }
+                        ];
+                    }
+                    if (!base.answers.some(a => a.isCorrect === true)) {
+                        base.answers[0].isCorrect = true;
+                    }
+                }
+
+                if (base.type === 'true_false_question') {
+                    const c = String(base.correctAnswer || '').toLowerCase();
+                    base.correctAnswer = (c === 'true' || c === 't' || c === '1' || c === 'yes') ? 'True' : 'False';
+                }
+
+                return base;
+            });
+        };
+
+        const extractJSON = (rawText) => {
+            if (!rawText || typeof rawText !== 'string') {
+                throw new Error("Empty response received from API");
+            }
+
+            let text = rawText.trim();
+
+            // Remove markdown code block wrappers
+            text = text.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '');
+
+            // Find JSON boundaries
+            let start = text.indexOf('{');
+            let end = text.lastIndexOf('}');
+
+            if (start === -1 || end === -1) {
+                throw new Error("No valid JSON structure found. The AI returned text instead of JSON data.");
+            }
+
+            let candidate = text.substring(start, end + 1);
+
+            // Check for truncation - count opening and closing braces
+            const openBraces = (candidate.match(/{/g) || []).length;
+            const closeBraces = (candidate.match(/}/g) || []).length;
+            const openBrackets = (candidate.match(/\[/g) || []).length;
+            const closeBrackets = (candidate.match(/\]/g) || []).length;
+
+            if (openBraces !== closeBraces || openBrackets !== closeBrackets) {
+                throw new Error(`JSON appears truncated (unmatched brackets detected). Try shorter input text. Found ${openBraces} { but ${closeBraces} }, ${openBrackets} [ but ${closeBrackets} ]`);
+            }
+
+            // Progressive cleaning attempts
+            const cleaningSteps = [
+                (s) => s, // Try as-is first
+                (s) => s.replace(/[\u201C\u201D]/g, '"').replace(/[\u2018\u2019]/g, "'"), // Smart quotes
+                (s) => s.replace(/,\s*([\]}])/g, '$1'), // Trailing commas
+                (s) => s.replace(/\\'/g, "'"), // Escaped quotes
+                (s) => s.replace(/[\u0000-\u001F\u007F-\u009F]/g, ''), // Control characters
+            ];
+
+            for (let i = 0; i < cleaningSteps.length; i++) {
+                try {
+                    const cleaned = cleaningSteps[i](candidate);
+                    const parsed = JSON.parse(cleaned);
+                    return parsed;
+                } catch (e) {
+                    if (i === cleaningSteps.length - 1) {
+                        throw new Error(`JSON parsing failed: ${e.message}. The AI output may be truncated or malformed.`);
+                    }
+                }
+            }
+
+            throw new Error("Unable to parse JSON after all cleaning attempts");
+        };
+
+        // QTI Generation
+        const generateManifest = (assessmentId, filename) => `<?xml version="1.0" encoding="UTF-8"?><manifest identifier="${genId('man')}" xmlns="http://www.imsglobal.org/xsd/imscp_v1p1"><resources><resource identifier="${genId('res')}" type="imsqti_xmlv1p2"><file href="${assessmentId}/${filename}"/></resource></resources></manifest>`;
+
+        const generateQuizXML = (assessmentId, title, questions) => {
+            const items = questions.map((q, idx) => {
+                const itemId = `${assessmentId}_q${idx}`;
+                const respId = `resp${idx}`;
+                const prompt = `<![CDATA[${q.prompt}]]>`;
+                let pres = '', proc = '';
+
+                if (q.type === 'multiple_choice_question') {
+                    const choices = q.answers.map((a, i) => `<response_label ident="c${i}"><material><mattext>${escapeXML(a.text)}</mattext></material></response_label>`).join('');
+                    const correctIdx = q.answers.findIndex(a => a.isCorrect);
+                    const correctIdent = `c${correctIdx === -1 ? 0 : correctIdx}`;
+                    pres = `<presentation><material><mattext texttype="text/html">${prompt}</mattext></material><response_lid ident="${respId}" rcardinality="Single"><render_choice>${choices}</render_choice></response_lid></presentation>`;
+                    proc = `<resprocessing><outcomes><decvar varname="SCORE" vartype="Decimal" minvalue="0" maxvalue="100"/></outcomes><respcondition continue="No"><conditionvar><varequal respident="${respId}">${correctIdent}</varequal></conditionvar><setvar varname="SCORE" action="Set">100</setvar></respcondition></resprocessing>`;
+                } else if (q.type === 'true_false_question') {
+                    const correctIdent = String(q.correctAnswer).toLowerCase() === 'true' ? 'true' : 'false';
+                    pres = `<presentation><material><mattext texttype="text/html">${prompt}</mattext></material><response_lid ident="${respId}" rcardinality="Single"><render_choice><response_label ident="true"><material><mattext>True</mattext></material></response_label><response_label ident="false"><material><mattext>False</mattext></material></response_label></render_choice></response_lid></presentation>`;
+                    proc = `<resprocessing><outcomes><decvar varname="SCORE" vartype="Decimal" minvalue="0" maxvalue="100"/></outcomes><respcondition continue="No"><conditionvar><varequal respident="${respId}">${correctIdent}</varequal></conditionvar><setvar varname="SCORE" action="Set">100</setvar></respcondition></resprocessing>`;
+                } else {
+                    pres = `<presentation><material><mattext texttype="text/html">${prompt}</mattext></material><response_str ident="${respId}" rcardinality="Single"><render_fib><response_label ident="${respId}_l"/></render_fib></response_str></presentation>`;
+                    proc = `<resprocessing><outcomes><decvar varname="SCORE" vartype="Decimal" minvalue="0" maxvalue="100"/></outcomes><respcondition continue="No"><conditionvar><varequal respident="${respId}">${escapeXML(q.correctText || '')}</varequal></conditionvar><setvar varname="SCORE" action="Set">100</setvar></respcondition></resprocessing>`;
+                }
+
+                return `<item ident="${itemId}" title="${escapeXML(q.title)}"><itemmetadata><qtimetadata><qtimetadatafield><fieldlabel>question_type</fieldlabel><fieldentry>${q.type}</fieldentry></qtimetadatafield><qtimetadatafield><fieldlabel>points_possible</fieldlabel><fieldentry>${q.points}</fieldentry></qtimetadatafield></qtimetadata></itemmetadata>${pres}${proc}</item>`;
+            }).join('\n');
+
+            return `<?xml version="1.0" encoding="UTF-8"?><questestinterop xmlns="http://www.imsglobal.org/xsd/ims_qtiasiv1p2"><assessment ident="${assessmentId}" title="${escapeXML(title)}"><section ident="${genId('sec')}">${items}</section></assessment></questestinterop>`;
+        };
+
+        const App = () => {
+            const [activeTab, setActiveTab] = useState('auto');
+            const [provider, setProvider] = useState('ollama');
+            const [ollamaUrl, setOllamaUrl] = useState(DEFAULT_OLLAMA_URL);
+            const [apiKey, setApiKey] = useState('');
+            const [modelName, setModelName] = useState(DEFAULT_MODEL);
+            const [showConfig, setShowConfig] = useState(false);
+            const [promptText, setPromptText] = useState('');
+            const [manualText, setManualText] = useState('');
+            const [manualCopied, setManualCopied] = useState(false);
+            const [questions, setQuestions] = useState([]);
+            const [quizTitle, setQuizTitle] = useState('Generated Quiz');
+            const [isGenerating, setIsGenerating] = useState(false);
+            const [isListening, setIsListening] = useState(false);
+            const [errorMsg, setErrorMsg] = useState('');
+            const [lastFullPrompt, setLastFullPrompt] = useState('');
+            const [lastRawResponse, setLastRawResponse] = useState('');
+            const [showRaw, setShowRaw] = useState(false);
+            const [showRawPrompt, setShowRawPrompt] = useState(false);
+
+            const startListening = () => {
+                const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+                if (!SpeechRecognition) { alert("Voice recognition not supported."); return; }
+                const recognition = new SpeechRecognition();
+                recognition.onstart = () => setIsListening(true);
+                recognition.onend = () => setIsListening(false);
+                recognition.onresult = (e) => setPromptText(prev => (prev ? prev + " " : "") + e.results[0][0].transcript);
+                recognition.start();
+            };
+
+            const handleGenerate = async () => {
+                if (!promptText.trim()) return;
+                setIsGenerating(true);
+                setErrorMsg('');
+                setLastRawResponse('');
+                setLastFullPrompt('');
+
+                const userPrompt = `Generate a quiz from these notes. Output ONLY JSON with no other text:\n\n${promptText.trim()}`;
+                setLastFullPrompt(`SYSTEM:\n${SYSTEM_PROMPT}\n\nUSER:\n${userPrompt}`);
+
+                try {
+                    let rawOutput = '';
+
+                    if (provider === 'ollama') {
+                        const response = await fetch(`${ollamaUrl}/api/generate`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                model: modelName,
+                                prompt: `${SYSTEM_PROMPT}\n\n${userPrompt}`,
+                                stream: false,
+                                options: { temperature: 0.7, top_p: 0.9 }
+                            })
+                        });
+                        if (!response.ok) {
+                            const errorText = await response.text();
+                            throw new Error(`Ollama API error: ${response.status} - ${errorText}`);
+                        }
+                        const data = await response.json();
+                        rawOutput = data.response || '';
+
+                    } else if (provider === 'gemini') {
+                        const url = `https://generativelanguage.googleapis.com/v1beta/models/${DEFAULT_GEMINI_MODEL}:generateContent?key=${apiKey}`;
+                        const response = await fetch(url, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                contents: [{ parts: [{ text: `${SYSTEM_PROMPT}\n\n${userPrompt}` }] }],
+                                generationConfig: { temperature: 0.7, topP: 0.9 }
+                            })
+                        });
+                        if (!response.ok) {
+                            const errorText = await response.text();
+                            throw new Error(`Gemini API error: ${response.status} - ${errorText}`);
+                        }
+                        const data = await response.json();
+                        rawOutput = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+
+                    } else {
+                        const response = await fetch(DEFAULT_OPENAI_URL, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer ${apiKey}`
+                            },
+                            body: JSON.stringify({
+                                model: DEFAULT_OPENAI_MODEL,
+                                messages: [
+                                    { role: "system", content: SYSTEM_PROMPT },
+                                    { role: "user", content: userPrompt }
+                                ],
+                                temperature: 0.7
+                            })
+                        });
+                        if (!response.ok) {
+                            const errorText = await response.text();
+                            throw new Error(`OpenAI API error: ${response.status} - ${errorText}`);
+                        }
+                        const data = await response.json();
+                        rawOutput = data.choices?.[0]?.message?.content || "";
+                    }
+
+                    if (!rawOutput) {
+                        throw new Error("API returned empty response");
+                    }
+
+                    setLastRawResponse(rawOutput);
+
+                    const parsed = extractJSON(rawOutput);
+
+                    let questionArray = null;
+                    let titleText = quizTitle;
+
+                    if (Array.isArray(parsed.questions)) {
+                        questionArray = parsed.questions;
+                        titleText = parsed.title || quizTitle;
+                    } else if (parsed.quiz && Array.isArray(parsed.quiz.questions)) {
+                        questionArray = parsed.quiz.questions;
+                        titleText = parsed.quiz.title || quizTitle;
+                    } else if (parsed.data && Array.isArray(parsed.data.questions)) {
+                        questionArray = parsed.data.questions;
+                        titleText = parsed.data.title || quizTitle;
+                    } else if (Array.isArray(parsed)) {
+                        questionArray = parsed;
+                    }
+
+                    if (!questionArray || questionArray.length === 0) {
+                        throw new Error("No questions found in response. The AI may have returned a summary instead of quiz data.");
+                    }
+
+                    const sanitized = sanitizeQuestions(questionArray);
+                    if (sanitized.length === 0) {
+                        throw new Error("Questions found but failed validation. Check the AI response format.");
+                    }
+
+                    setQuizTitle(titleText);
+                    setQuestions(sanitized);
+                    setActiveTab('editor');
+
+                } catch (err) {
+                    console.error('Generation error:', err);
+                    setErrorMsg(err.message || "Unknown error occurred");
+                } finally {
+                    setIsGenerating(false);
+                }
+            };
+
+            const handleExport = async () => {
+                if (questions.length === 0) return;
+                try {
+                    const zip = new JSZip();
+                    // Create clean ID based on quiz title
+                    const cleanTitle = quizTitle
+                        .toLowerCase()
+                        .replace(/[^a-z0-9\s]/gi, '') // Remove special chars
+                        .trim()
+                        .replace(/\s+/g, '_') // Replace spaces with underscores
+                        .substring(0, 50); // Limit length
+
+                    const id = cleanTitle || 'quiz'; // Fallback to 'quiz' if title is empty
+                    const timestamp = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+                    const folderName = `${id}_${timestamp}`;
+                    // Structure: imsmanifest.xml + folder/quiz.xml (required by Canvas)
+                    zip.file('imsmanifest.xml', generateManifest(folderName, `${id}.xml`));
+                    zip.folder(folderName).file(`${id}.xml`, generateQuizXML(folderName, quizTitle, questions));
+                    const blob = await zip.generateAsync({ type: 'blob' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `${cleanTitle || 'quiz'}.zip`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                } catch (e) {
+                    alert("Export Failed: " + e.message);
+                }
+            };
+
+            return (
+                <div className="max-w-4xl mx-auto p-4 md:p-8 min-h-screen flex flex-col">
+                    <div className="flex flex-col md:flex-row justify-between items-center mb-6 gap-4">
+                        <div className="flex items-center gap-3">
+                            <img src="https://s3.us-east-2.amazonaws.com/sidearm.sites/lccc.wy.edu/images/responsive_2021/logo_main.svg" alt="LCCC" className="h-10 w-auto" />
+                            <div>
+                                <h1 className="text-2xl font-bold text-lccc-blue leading-none">Quiz Studio</h1>
+                                <p className="text-xs text-gray-500 font-medium uppercase mt-1 tracking-widest">LCCC AI Program</p>
+                            </div>
+                        </div>
+                        <button onClick={() => setShowConfig(!showConfig)} className="text-gray-400 hover:text-lccc-blue transition-all"><Icon name="settings" size={24} /></button>
+                    </div>
+
+                    {showConfig && (
+                        <div className="card p-4 mb-6 border-l-4 border-lccc-gold shadow-md animate-fade-in">
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div><label className="block text-xs font-bold text-gray-500 mb-1">Provider</label><select className="w-full border rounded p-2" value={provider} onChange={(e) => setProvider(e.target.value)}><option value="ollama">Local Ollama</option><option value="gemini">Google Gemini</option><option value="openai">OpenAI</option></select></div>
+                                <div><label className="block text-xs font-bold text-gray-500 mb-1">{provider === 'ollama' ? 'Ollama URL' : 'API Key'}</label><input type={provider === 'ollama' ? 'text' : 'password'} className="w-full border rounded p-2" value={provider === 'ollama' ? ollamaUrl : apiKey} onChange={(e) => provider === 'ollama' ? setOllamaUrl(e.target.value) : setApiKey(e.target.value)} placeholder={provider === 'ollama' ? 'http://localhost:11434' : 'Enter API key'} /></div>
+                                <div className="md:col-span-2"><label className="block text-xs font-bold text-gray-500 mb-1">Model Name</label><input type="text" className="w-full border rounded p-2 font-mono text-sm" value={modelName} onChange={(e) => setModelName(e.target.value)} /></div>
+                            </div>
+                        </div>
+                    )}
+
+                    <div className="flex border-b border-gray-300 mb-6 overflow-x-auto whitespace-nowrap">
+                        <button onClick={() => setActiveTab('auto')} className={`px-6 py-3 font-bold text-sm flex items-center gap-2 border-b-2 transition-colors ${activeTab === 'auto' ? 'border-lccc-blue text-lccc-blue' : 'border-transparent text-gray-500'}`}><Icon name="sparkles" size={18} /> Auto-Pilot</button>
+                        <button onClick={() => setActiveTab('manual')} className={`px-6 py-3 font-bold text-sm flex items-center gap-2 border-b-2 transition-colors ${activeTab === 'manual' ? 'border-lccc-blue text-lccc-blue' : 'border-transparent text-gray-500'}`}><Icon name="terminal" size={18} /> Manual</button>
+                        <button onClick={() => setActiveTab('editor')} className={`px-6 py-3 font-bold text-sm flex items-center gap-2 border-b-2 transition-colors ${activeTab === 'editor' ? 'border-lccc-blue text-lccc-blue' : 'border-transparent text-gray-500'}`}><Icon name="edit-3" size={18} /> Quiz Editor ({questions.length})</button>
+                    </div>
+
+                    {activeTab === 'auto' && (
+                        <div className="animate-fade-in">
+                            <div className="card p-6 bg-white shadow-sm border-t-4 border-lccc-blue">
+                                <div className="flex items-center justify-between mb-2">
+                                    <label className="block font-bold text-lg text-gray-800">Quiz Topic or Notes</label>
+                                    <span className={`text-sm font-mono ${promptText.length > 10000 ? 'text-red-600 font-bold' : promptText.length > 5000 ? 'text-orange-500' : 'text-gray-400'}`}>
+                                        {promptText.length.toLocaleString()} chars {promptText.length > 10000 ? '⚠️ Very Large!' : promptText.length > 5000 ? '⚠️' : ''}
+                                    </span>
+                                </div>
+                                <div className="relative">
+                                    <textarea className="w-full h-64 p-4 border border-gray-300 rounded-lg focus:ring-2 focus:ring-lccc-blue outline-none text-gray-700 leading-relaxed pr-16" placeholder="Paste lecture notes or content here..." value={promptText} onChange={(e) => setPromptText(e.target.value)} />
+                                    <button onClick={startListening} title="Voice Input" className={`absolute bottom-4 right-4 p-3 rounded-full shadow-lg transition-all ${isListening ? 'bg-red-500 text-white' : 'bg-gray-100 text-gray-500 hover:text-lccc-blue'}`}>
+                                        {isListening && <div className="recording-ring"></div>}
+                                        <div className="relative z-10"><Icon name={isListening ? "mic-off" : "mic"} size={20} /></div>
+                                    </button>
+                                </div>
+
+                                {errorMsg && (
+                                    <div className="mt-4 bg-red-50 text-red-600 p-4 rounded border border-red-200 text-sm animate-fade-in">
+                                        <div className="font-bold flex items-center gap-2 mb-2"><Icon name="alert-triangle" size={16} /> Generation Error</div>
+                                        <p className="mb-2">{errorMsg}</p>
+                                        <div className="text-xs text-red-500 mb-3">
+                                            <strong>Troubleshooting tips:</strong>
+                                            <ul className="list-disc ml-5 mt-1 space-y-1">
+                                                <li>Try shorter or simpler input text</li>
+                                                <li>Check if your API key or Ollama connection is working</li>
+                                                <li>Verify your model name is correct</li>
+                                                <li>Review the raw response below to see what the AI actually returned</li>
+                                            </ul>
+                                        </div>
+                                        {lastRawResponse && (
+                                            <button onClick={() => setShowRaw(!showRaw)} className="text-xs text-red-700 underline hover:text-red-900 mb-2">
+                                                {showRaw ? 'Hide' : 'Show'} Raw AI Response
+                                            </button>
+                                        )}
+                                        {showRaw && lastRawResponse && (
+                                            <pre className="mt-2 p-3 bg-gray-900 text-green-400 rounded text-xs overflow-auto max-h-64 font-mono">
+                                                {lastRawResponse}
+                                            </pre>
+                                        )}
+                                    </div>
+                                )}
+
+                                <div className="mt-6 flex gap-3">
+                                    <button onClick={handleGenerate} disabled={!promptText.trim() || isGenerating} className="flex-1 bg-lccc-blue text-white py-3 px-6 rounded-lg font-bold flex items-center justify-center gap-2 hover-bg-lccc-blue disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-md hover:shadow-lg">
+                                        {isGenerating ? <><div className="loader"></div> Generating...</> : <><Icon name="zap" size={20} /> Generate Quiz</>}
+                                    </button>
+                                    {lastFullPrompt && (
+                                        <button onClick={() => setShowRawPrompt(!showRawPrompt)} className="px-4 py-3 border-2 border-gray-300 text-gray-600 rounded-lg font-bold hover:border-lccc-blue hover:text-lccc-blue transition-all">
+                                            <Icon name="eye" size={20} />
+                                        </button>
+                                    )}
+                                </div>
+
+                                {showRawPrompt && lastFullPrompt && (
+                                    <div className="mt-4 animate-fade-in">
+                                        <div className="bg-gray-50 p-4 rounded border border-gray-300">
+                                            <div className="flex items-center justify-between mb-2">
+                                                <span className="text-xs font-bold text-gray-600 uppercase tracking-wide">Full Prompt Sent to AI</span>
+                                                <button onClick={() => setShowRawPrompt(false)} className="text-gray-400 hover:text-gray-600">
+                                                    <Icon name="x" size={16} />
+                                                </button>
+                                            </div>
+                                            <pre className="p-3 bg-white border rounded text-xs overflow-auto max-h-96 font-mono text-gray-700 whitespace-pre-wrap">
+                                                {lastFullPrompt}
+                                            </pre>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    )}
+
+                    {activeTab === 'manual' && (
+                        <div className="animate-fade-in">
+                            <div className="card p-6 bg-white shadow-sm border-t-4 border-lccc-gold">
+                                <div className="mb-4 bg-blue-50 border border-blue-200 rounded p-4 text-sm">
+                                    <div className="flex items-start gap-2">
+                                        <Icon name="info" size={18} className="text-blue-600 mt-0.5 flex-shrink-0" />
+                                        <div className="text-gray-700">
+                                            <strong>Manual Mode:</strong> Copy the system prompt below, paste it into ChatGPT/Claude/Gemini along with your content, then paste the JSON response back here.
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <label className="block font-bold text-sm text-gray-700 mb-2">System Prompt (Copy This)</label>
+                                <div className="relative mb-6">
+                                    <pre className="p-4 bg-gray-900 text-green-400 rounded-lg text-xs overflow-auto max-h-64 font-mono whitespace-pre-wrap">
+                                        {SYSTEM_PROMPT}
+                                    </pre>
+                                    <button onClick={() => { navigator.clipboard.writeText(SYSTEM_PROMPT); setManualCopied(true); setTimeout(() => setManualCopied(false), 2000); }} className="absolute top-2 right-2 bg-gray-700 hover:bg-gray-600 text-white px-3 py-1.5 rounded text-xs font-bold flex items-center gap-1 transition-colors">
+                                        <Icon name={manualCopied ? "check" : "copy"} size={14} />
+                                        {manualCopied ? 'Copied!' : 'Copy'}
+                                    </button>
+                                </div>
+
+                                <label className="block font-bold text-sm text-gray-700 mb-2">Paste JSON Response Here</label>
+                                <textarea className="w-full h-64 p-4 border border-gray-300 rounded-lg font-mono text-sm focus:ring-2 focus:ring-lccc-gold outline-none" placeholder='{"title": "Quiz Title", "questions": [...]}' value={manualText} onChange={(e) => setManualText(e.target.value)} />
+
+                                <button onClick={() => {
+                                    try {
+                                        const parsed = extractJSON(manualText);
+                                        const questionArray = parsed.questions || parsed.quiz?.questions || parsed.data?.questions || (Array.isArray(parsed) ? parsed : null);
+                                        if (!questionArray || questionArray.length === 0) {
+                                            throw new Error("No questions array found in JSON");
+                                        }
+                                        const sanitized = sanitizeQuestions(questionArray);
+                                        setQuizTitle(parsed.title || parsed.quiz?.title || parsed.data?.title || 'Manual Quiz');
+                                        setQuestions(sanitized);
+                                        setActiveTab('editor');
+                                        setManualText('');
+                                    } catch (e) {
+                                        alert("Invalid JSON: " + e.message);
+                                    }
+                                }} disabled={!manualText.trim()} className="mt-4 w-full bg-lccc-gold text-gray-900 py-3 px-6 rounded-lg font-bold flex items-center justify-center gap-2 hover:bg-yellow-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-md">
+                                    <Icon name="upload" size={20} /> Import Quiz
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    {activeTab === 'editor' && (
+                        <div className="animate-fade-in space-y-4">
+                            <div className="card p-6 bg-white shadow-sm border-t-4 border-lccc-blue">
+                                <label className="block font-bold text-sm text-gray-700 mb-2">Quiz Title</label>
+                                <input type="text" className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-lccc-blue outline-none" value={quizTitle} onChange={(e) => setQuizTitle(e.target.value)} />
+                            </div>
+
+                            {questions.length === 0 ? (
+                                <div className="card p-12 text-center bg-gray-50">
+                                    <Icon name="file-question" size={48} className="mx-auto text-gray-300 mb-4" />
+                                    <p className="text-gray-500 font-medium">No questions yet. Generate a quiz to get started.</p>
+                                </div>
+                            ) : (
+                                <>
+                                    {questions.map((q, idx) => (
+                                        <div key={idx} className="card p-6 bg-white shadow-sm hover:shadow-md transition-shadow">
+                                            <div className="flex items-start justify-between mb-4">
+                                                <input type="text" className="flex-1 font-bold text-lg text-gray-800 border-b-2 border-transparent hover:border-gray-300 focus:border-lccc-blue outline-none px-2 py-1 transition-colors" value={q.title} onChange={(e) => setQuestions(prev => prev.map((item, i) => i === idx ? { ...item, title: e.target.value } : item))} />
+                                                <button onClick={() => setQuestions(prev => prev.filter((_, i) => i !== idx))} className="text-red-400 hover:text-red-600 ml-4 transition-colors"><Icon name="trash-2" size={20} /></button>
+                                            </div>
+
+                                            <textarea className="w-full p-3 border border-gray-300 rounded-lg mb-4 focus:ring-2 focus:ring-lccc-blue outline-none text-gray-700 leading-relaxed" rows="3" value={q.prompt} onChange={(e) => setQuestions(prev => prev.map((item, i) => i === idx ? { ...item, prompt: e.target.value } : item))} />
+
+                                            <div className="flex items-center gap-4 mb-4">
+                                                <div className="flex-1">
+                                                    <label className="block text-xs font-bold text-gray-500 mb-1">Question Type</label>
+                                                    <select className="w-full p-2 border border-gray-300 rounded focus:ring-2 focus:ring-lccc-blue outline-none" value={q.type} onChange={(e) => setQuestions(prev => prev.map((item, i) => i === idx ? { ...item, type: e.target.value } : item))}>
+                                                        <option value="multiple_choice_question">Multiple Choice</option>
+                                                        <option value="true_false_question">True/False</option>
+                                                        <option value="short_answer_question">Short Answer</option>
+                                                    </select>
+                                                </div>
+                                                <div className="w-24">
+                                                    <label className="block text-xs font-bold text-gray-500 mb-1">Points</label>
+                                                    <input type="number" className="w-full p-2 border border-gray-300 rounded focus:ring-2 focus:ring-lccc-blue outline-none" value={q.points} onChange={(e) => setQuestions(prev => prev.map((item, i) => i === idx ? { ...item, points: parseInt(e.target.value) || 1 } : item))} />
+                                                </div>
+                                            </div>
+
+                                            {q.type === 'multiple_choice_question' && (
+                                                <div className="space-y-2">
+                                                    {q.answers.map((a, aidx) => (
+                                                        <div key={aidx} className="flex items-center gap-2 p-2 rounded hover:bg-gray-50">
+                                                            <input type="radio" name={`correct_${idx}`} checked={a.isCorrect} onChange={() => setQuestions(prev => prev.map((item, i) => i === idx ? { ...item, answers: item.answers.map((ans, ai) => ({ ...ans, isCorrect: ai === aidx })) } : item))} className="w-4 h-4 accent-lccc-blue" />
+                                                            <input type="text" className="flex-1 p-2 border border-gray-300 rounded focus:ring-2 focus:ring-lccc-blue outline-none" value={a.text} onChange={(e) => setQuestions(prev => prev.map((item, i) => i === idx ? { ...item, answers: item.answers.map((ans, ai) => ai === aidx ? { ...ans, text: e.target.value } : ans) } : item))} />
+                                                            {q.answers.length > 2 && (
+                                                                <button onClick={() => setQuestions(prev => prev.map((item, i) => i === idx ? { ...item, answers: item.answers.filter((_, ai) => ai !== aidx) } : item))} className="text-red-400 hover:text-red-600"><Icon name="x" size={18} /></button>
+                                                            )}
+                                                        </div>
+                                                    ))}
+                                                    <button onClick={() => setQuestions(prev => prev.map((item, i) => i === idx ? { ...item, answers: [...item.answers, { text: `Option ${item.answers.length + 1}`, isCorrect: false }] } : item))} className="text-sm text-lccc-blue hover:text-blue-700 font-medium flex items-center gap-1 mt-2">
+                                                        <Icon name="plus" size={16} /> Add Answer Option
+                                                    </button>
+                                                </div>
+                                            )}
+
+                                            {q.type === 'true_false_question' && (
+                                                <div className="flex gap-4">
+                                                    <label className="flex items-center gap-2 cursor-pointer p-3 border-2 rounded-lg flex-1 hover:bg-gray-50 transition-colors" style={{ borderColor: q.correctAnswer === 'True' ? '#003366' : '#e5e7eb' }}>
+                                                        <input type="radio" name={`tf_${idx}`} checked={q.correctAnswer === 'True'} onChange={() => setQuestions(prev => prev.map((item, i) => i === idx ? { ...item, correctAnswer: 'True' } : item))} className="w-4 h-4 accent-lccc-blue" />
+                                                        <span className="font-medium">True</span>
+                                                    </label>
+                                                    <label className="flex items-center gap-2 cursor-pointer p-3 border-2 rounded-lg flex-1 hover:bg-gray-50 transition-colors" style={{ borderColor: q.correctAnswer === 'False' ? '#003366' : '#e5e7eb' }}>
+                                                        <input type="radio" name={`tf_${idx}`} checked={q.correctAnswer === 'False'} onChange={() => setQuestions(prev => prev.map((item, i) => i === idx ? { ...item, correctAnswer: 'False' } : item))} className="w-4 h-4 accent-lccc-blue" />
+                                                        <span className="font-medium">False</span>
+                                                    </label>
+                                                </div>
+                                            )}
+
+                                            {q.type === 'short_answer_question' && (
+                                                <div>
+                                                    <label className="block text-xs font-bold text-gray-500 mb-1">Correct Answer</label>
+                                                    <input type="text" className="w-full p-2 border border-gray-300 rounded focus:ring-2 focus:ring-lccc-blue outline-none" value={q.correctText || ''} onChange={(e) => setQuestions(prev => prev.map((item, i) => i === idx ? { ...item, correctText: e.target.value } : item))} placeholder="Expected answer text" />
+                                                </div>
+                                            )}
+                                        </div>
+                                    ))}
+
+                                    <button onClick={() => setQuestions(prev => [...prev, { type: 'multiple_choice_question', title: `Question ${prev.length + 1}`, points: 1, prompt: '', answers: [{ text: 'Option A', isCorrect: true }, { text: 'Option B', isCorrect: false }], correctAnswer: 'True', correctText: '' }])} className="w-full card p-4 border-2 border-dashed border-gray-300 hover:border-lccc-blue text-gray-500 hover:text-lccc-blue font-bold flex items-center justify-center gap-2 transition-all cursor-pointer">
+                                        <Icon name="plus-circle" size={20} /> Add Question
+                                    </button>
+
+                                    <div className="flex gap-4 pt-4">
+                                        <button onClick={handleExport} className="flex-1 bg-lccc-blue text-white py-4 px-6 rounded-lg font-bold flex items-center justify-center gap-2 hover-bg-lccc-blue transition-all shadow-md hover:shadow-lg">
+                                            <Icon name="download" size={20} /> Export QTI Package
+                                        </button>
+                                    </div>
+                                </>
+                            )}
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+
+</html>
